@@ -1,0 +1,226 @@
+//Arduino IDE c/c++ code for prototype hardware (vaccipod)
+#include <WiFi.h>
+#include <SoftwareSerial.h> // Include the SoftwareSerial library
+
+// Set your own SSID and password for the ESP32 AP
+const char* ssid = "ESP32_AP";
+const char* password = "12345678";
+
+// Set up the web server on port 80
+WiFiServer server(80);
+
+// GPIO pin assignments
+const int sensorPin = 34;      // GPIO pin for LM35
+const int relayFanPin = 12;    // GPIO pin connected to the fan relay
+const int relayCoolerPin = 13; // GPIO pin connected to the cooler relay
+const int buzzerPin = 14;      // GPIO pin for the buzzer
+
+// Software Serial setup for HC-05
+SoftwareSerial bluetooth(2, 3); // RX, TX pins for HC-05
+
+// Variables
+float temperature = 0.0;
+bool fanState = false;
+bool coolerState = false;
+bool autoMode = false;
+bool alarmActive = false; // Variable to track alarm status
+
+void setup() {
+    Serial.begin(115200);
+    bluetooth.begin(9600); // Start Bluetooth communication
+    pinMode(relayFanPin, OUTPUT);
+    pinMode(relayCoolerPin, OUTPUT);
+    pinMode(buzzerPin, OUTPUT);
+    digitalWrite(relayFanPin, HIGH);
+    digitalWrite(relayCoolerPin, HIGH);
+
+    // Buzz twice on startup
+    // buzzTwice();
+
+    // Set up ESP32 as an Access Point
+    WiFi.softAP(ssid, password);
+    Serial.println("Access Point started");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.softAPIP());
+
+    // Start the server
+    server.begin();
+    Serial.println("Web server started");
+}
+
+void loop() {
+    // Read temperature from LM35
+    readTemperature();
+
+    // Handle Auto mode: controls fan and cooler based on temperature
+    if (autoMode) {
+        if (temperature > 8.0) {
+            coolerState = true;
+            fanState = true;
+        } else if (temperature <= 3.0) {
+            coolerState = false;
+            fanState = false;
+        }
+        digitalWrite(relayCoolerPin, coolerState ? LOW : HIGH);
+        digitalWrite(relayFanPin, fanState ? LOW : HIGH);
+    }
+
+    // Handle alarm sound
+    if (alarmActive) {
+        playAlarmSound();
+    }
+
+    // Check for Bluetooth commands
+    if (bluetooth.available()) {
+        String command = bluetooth.readStringUntil('\n');
+        Serial.println("Bluetooth Command: " + command);
+        handleBluetoothCommand(command);
+    }
+
+    // Check for client connections
+    WiFiClient client = server.available();
+    if (client) {
+        Serial.println("New Client Connected");
+        String request = client.readStringUntil('\r');
+        Serial.println(request);
+
+        // Toggle fan request
+        if (request.indexOf("GET /toggleFan") >= 0 && !autoMode) {
+            fanState = !fanState;
+            digitalWrite(relayFanPin, fanState ? LOW : HIGH);
+            buzzOnce();
+            sendClientResponse(client, fanState ? "Fan On" : "Fan Off");
+        }
+        // Toggle cooler request
+        else if (request.indexOf("GET /toggleCooler") >= 0 && !autoMode) {
+            coolerState = !coolerState;
+            digitalWrite(relayCoolerPin, coolerState ? LOW : HIGH);
+            buzzOnce();
+            sendClientResponse(client, coolerState ? "Cooler On" : "Cooler Off");
+        }
+        // Toggle auto mode request
+        else if (request.indexOf("GET /toggleAuto") >= 0) {
+            autoMode = !autoMode;
+            if (!autoMode) {
+                coolerState = false;
+                fanState = false;
+                digitalWrite(relayFanPin, HIGH);
+                digitalWrite(relayCoolerPin, HIGH);
+            }
+            buzzOnce();
+            sendClientResponse(client, autoMode ? "Auto Mode On" : "Auto Mode Off");
+        }
+        // Toggle alarm request
+        else if (request.indexOf("GET /toggleAlarm") >= 0) {
+            alarmActive = !alarmActive;
+            if (!alarmActive) {
+                digitalWrite(buzzerPin, LOW); // Stop the buzzer if alarm is turned off
+            }
+            sendClientResponse(client, alarmActive ? "Alarm On" : "Alarm Off");
+        }
+        // Serve HTML page
+        else {
+            serveHTMLPage(client);
+        }
+    }
+}
+
+// Function to handle Bluetooth commands
+void handleBluetoothCommand(const String& command) {
+    if (command.equalsIgnoreCase("auto on")) {
+        autoMode = true;
+        buzzOnce();
+    } else if (command.equalsIgnoreCase("auto off")) {
+        autoMode = false;
+        coolerState = false;
+        fanState = false;
+        digitalWrite(relayFanPin, HIGH);
+        digitalWrite(relayCoolerPin, HIGH);
+        buzzOnce();
+    }
+}
+
+// HTML Page and CSS/JS for the UI
+void serveHTMLPage(WiFiClient client) {
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-type:text/html");
+    client.println();
+
+    client.println("<!DOCTYPE html><html>");
+    client.println("<head>");
+    client.println("<title>Portable and Opensource Insulin Pod</title>");
+    client.println("<h2>Created by:</h2>");
+    client.println("<h3>Ameer Salam</h3>");
+    client.println("<h3>Prajwal A</h3>");
+    client.println("<h3>Aryan Vidyarthi</h3>");
+    client.println("<style>");
+    client.println("body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }");
+    client.println(".temperature { font-size: 2em; color: #3498db; }");
+    client.println(".control { display: flex; align-items: center; justify-content: center; margin-top: 20px; }");
+    client.println(".slide-button { width: 60px; height: 30px; background-color: #e74c3c; border-radius: 15px; cursor: pointer; transition: background-color 0.3s; position: relative; }");
+    client.println(".slide-button.active { background-color: #2ecc71; }");
+    client.println(".slide-button:before { content: ''; position: absolute; width: 26px; height: 26px; background-color: #ffffff; border-radius: 50%; top: 2px; left: 2px; transition: left 0.3s; }");
+    client.println(".slide-button.active:before { left: 32px; }");
+    client.println(".status-text { margin-left: 10px; font-size: 1.2em; font-weight: bold; }");
+    client.println("</style>");
+    client.println("<script>");
+    client.println("function toggle(control) { fetch('/toggle' + control).then(response => response.text()).then(data => { updateStatus(control, data); }); }");
+    client.println("function updateStatus(control, status) { const button = document.getElementById(control + 'Button'); const statusText = document.getElementById('statusText' + control); if (status.includes('On')) { button.classList.add('active'); statusText.innerText = control + ' On'; statusText.style.color = '#2ecc71'; } else { button.classList.remove('active'); statusText.innerText = control + ' Off'; statusText.style.color = '#e74c3c'; } }");
+    client.println("</script>");
+    client.println("</head><body>");
+    client.println("<h1>Portable and Opensource Insulin Pod</h1>");
+    client.print("<div class='temperature' id='temp'>");
+    client.print(temperature);
+    client.println(" °C</div>");
+
+    // Fan Control
+    client.println("<div class='control'><div id='fanButton' class='slide-button' onclick='toggle(\"Fan\")'></div><div id='statusTextFan' class='status-text' style='color:" + String(fanState ? "#2ecc71" : "#e74c3c") + ";'>" + String(fanState ? "Fan On" : "Fan Off") + "</div></div>");
+    
+    // Cooler Control
+    client.println("<div class='control'><div id='coolerButton' class='slide-button' onclick='toggle(\"Cooler\")'></div><div id='statusTextCooler' class='status-text' style='color:" + String(coolerState ? "#2ecc71" : "#e74c3c") + ";'>" + String(coolerState ? "Cooler On" : "Cooler Off") + "</div></div>");
+    
+    // Auto Mode Control
+    client.println("<div class='control'><div id='autoButton' class='slide-button' onclick='toggle(\"Auto\")'></div><div id='statusTextAuto' class='status-text' style='color:" + String(autoMode ? "#2ecc71" : "#e74c3c") + ";'>" + String(autoMode ? "Auto Mode On" : "Auto Mode Off") + "</div></div>");
+    
+        // Alarm Control
+    client.println("<div class='control'><div id='alarmButton' class='slide-button' onclick='toggle(\"Alarm\")'></div><div id='statusTextAlarm' class='status-text' style='color:" + String(alarmActive ? "#2ecc71" : "#e74c3c") + ";'>" + String(alarmActive ? "Alarm On" : "Alarm Off") + "</div></div>");
+    
+    client.println("</body></html>");
+    client.stop();
+}
+
+// Alarm sound pattern
+void playAlarmSound() {
+    for (int i = 0; i < 4; i++) {
+        digitalWrite(buzzerPin, HIGH);
+        delay(100);
+        digitalWrite(buzzerPin, LOW);
+        delay(100);
+    }
+}
+
+// Function to read temperature from the LM35 sensor
+void readTemperature() {
+    int sensorValue = analogRead(sensorPin);
+    temperature = (sensorValue * 3.3 / 4095.0) * 100; // Convert analog value to temperature in Celsius
+}
+
+// Function to send a response back to the client
+void sendClientResponse(WiFiClient& client, const String& message) {
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-type:text/plain");
+    client.println();
+    client.print(message);
+    client.println();
+    delay(1);
+    client.stop();
+    Serial.println(message + " Request Processed and Client disconnected");
+}
+
+// Function to buzz once
+void buzzOnce() {
+    digitalWrite(buzzerPin, HIGH);
+    delay(100);
+    digitalWrite(buzzerPin, LOW);
+}
+// ML code to predict diabeties
